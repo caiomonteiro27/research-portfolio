@@ -1,0 +1,182 @@
+---
+title: "Projeto de Econometria"
+author: "Caio Monteiro"
+date: "2026-06-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Trabalho de Econometria
+
+Para este trabalho, optei usar um modelo ARIMA com os dados do PIB fornecidos pela PENN World Table. Animado com o poder de previsão, perguntei-me quão precisas seriam as previsões, usando apenas a variável PIB. Para tal, optei para usar os dados já existentes até 2022 (portanto de 1950 a 2022) para prever os anos 2023 e 2024. Tomei essa decisão por já termos o PIB de 2023 e 2024. Assim, poderemos comparar diretamente a previsão com o ocorrido na realidade.
+
+
+```{r introduçao}
+library(readxl)       
+library(tseries)      
+library(forecast)     
+library(ggplot2)      
+library(dplyr)       
+library(knitr)
+
+
+#abrindo a planilha e definindo as variáveis
+pwt <- read_excel("/home/caiomonteiro/Downloads/pibPENN.xlsx", sheet = "Planilha1")
+
+brasil <- pwt %>%
+  select(year, rgdpna) %>%                 
+  arrange(year) %>%                        
+  na.omit()                                
+
+# ver as primeiras linhas para confirmar se está tudo certo
+head(brasil)
+
+
+#construindo a série temporal
+pib <- ts(brasil$rgdpna, start = 1950, frequency = 1)
+
+#visualizar
+autoplot(pib) +
+  labs(title = "PIB real do Brasil (1950-2023)",
+       y = "PIB", x = "Ano")
+
+```
+
+Ao plotar o gráfico da variável pib, a variável não parece muito estável, variando bastante. Por isso, optamos por trabalhar com o logaritmo. Assim, estabilizamos a variância e deixamos a interpretação mais simples.
+
+
+```{r log pib}
+# Transformar em logaritmo natural
+lpib <- log(pib)
+
+# Visualizar a série
+autoplot(lpib) +
+  labs(title = "Log do PIB real do Brasil (1950-2023)",
+       y = "log(PIB)", x = "Ano")
+```
+
+Nota-se uma série temporal muito mais estável, sendo melhor de trabalhar.
+Testamos então se a série tem raiz unitária, para investigarmos a estacionariedade dela. Faremos isso por meio de um teste ADF. Caso obtenhamos p > 0.05, concluíremos que não é estacionária.
+
+
+```{r teste raiz unitária}
+adf.test(lpib, alternative = "stationary")      
+adf.test(diff(lpib), alternative = "stationary") 
+```
+      
+ A série inicial apresenta raiz unitária, pois reprova no teste ADF (p > 0.05). Por isso, testamos logo em seguida a primeria diferença. Obtemos estacionariedade.     
+  Agora, construamos a ACF e PACF da série, para cogitarmos sobre o modelo a ser usado.
+  
+  
+```{r ACFPACF}
+  
+  par(mfrow = c(1,2))
+acf(diff(lpib), main = "ACF da taxa de crescimento")
+pacf(diff(lpib), main = "PACF da taxa de crescimento")
+par(mfrow = c(1,1))
+```
+
+Como a ACF decai lentamente e a PACF cessa na segunda observação. Cogitamos se tratar de um ARIMA(2,1,0).
+
+
+```{r AICBIC, echo=FALSE, message=FALSE, warning=FALSE}
+
+m_ar2 <- Arima(lpib, order = c(2, 1, 0))
+m_arma21 <- Arima(lpib, order = c(2, 1, 1))
+
+
+aics <- c(AIC(m_ar2), AIC(m_arma21))
+bics <- c(BIC(m_ar2), BIC(m_arma21))
+
+
+tabela <- data.frame(
+  Modelo = c("ARIMA(2,1,0)", "ARIMA(2,1,1)"),
+  AIC = round(aics, 2),
+  BIC = round(bics, 2)
+)
+
+kable(tabela, caption = "Comparação de modelos pelo AIC e BIC")
+```
+
+Como os valores do AIC e BIC são tão próximos, preferimos usar o código autoarima para vermos sua sugestão.
+
+
+```{r autoarima}
+#delimitamos a variável de treino e de teste
+treino <- window(lpib, end = 2022)
+teste  <- window(lpib, start = 2023)  
+
+
+mod_arima <- auto.arima(treino, stepwise = FALSE, approximation = FALSE)
+summary(mod_arima)
+
+```
+
+Curiosamente, o autoarima sugere que usemos duas diferenças. Cogitamos que isso possa se dever ao fato de que, apesar de ter sido aprovado, o teste de raiz unitária com apenas uma diferença possui um valor limítrofe, quase sendo rejeitado. Então, apesar do AIC e do BIC serem piores, faz sentido usar duas diferenças. Seguiremos, no resto do trabalho, usando a intuição do autoarima. Entretanto, devemos ressaltar a mudança de intuição econômica. Enquanto, ao se tratar de um AR(2), tínhamos que a taxa de crescimento do PIB gira em torno de uma média (AR), agora ela passa a depender de choques (MA).
+
+
+```{r teste dos resíduos}
+checkresiduals(mod_arima)
+
+# Teste de Ljung-Box para autocorrelação residual
+Box.test(residuals(mod_arima), lag = 10, type = "Ljung-Box")
+```
+
+Testando os resíduos do modelo, obtemos um p-valor claramente maior que p > 0.05. Por isso, conclúmos que o modelo é adequeado e seus resíduos são resíduos brancos.
+
+A seguir, realizamos a previsão para 2023 e 2024.
+
+
+```{r previsao}
+previsao <- forecast(mod_arima, h = 2)
+
+previsao
+
+# Extrair os valores previstos (em log)
+prev_log <- previsao$mean
+
+# Converter para nível (milhões de US$ 2021) 
+prev_nivel <- exp(prev_log)
+
+# Criar um data.frame com os resultados
+anos_prev <- c(2023, 2024)
+previsoes <- data.frame(
+  Ano = anos_prev,
+  PIB_previsto_USD_milhoes = round(prev_nivel, 2),
+  PIB_previsto_log = round(prev_log, 4)
+)
+print(previsoes)
+
+autoplot(lpib, series = "Histórico") +
+  autolayer(previsao, series = "Previsão", PI = TRUE) +
+  labs(title = "PIB real do Brasil (log) – Previsão ARIMA",
+       y = "log(PIB)", x = "Ano") +
+  theme_minimal()
+```
+
+Obtemos, então, nossas estimativas para o PIB em 2023 e 2024 em US$, além de um gráfico do comportamento esperado, que é um crescimento sutil, não muito grande. Por fim, basta compararmos com os dados reais.
+
+Para facilitar problemas de conversão de moeda, tomamos o valor de 2022 do PENN World Table e aplicamos a taxa de crescimento anunciada pelo IBGE para os anos 2023 e 2024, a saber, 3,2% e 3,4%, respectivamente. Finalmente, geramos uma tabela de comparação.
+
+```{r comparaçao}
+pib_real_2022 <- exp(window(lpib, start = 2022, end = 2022))  # valor real da PWT para 2022
+cresc_real_2023 <- 0.032 # 2,9% (exemplo)
+cresc_real_2024 <- 0.034  # 3,2% (exemplo)
+
+pib_real_2023 <- pib_real_2022 * (1 + cresc_real_2023)
+pib_real_2024 <- pib_real_2023 * (1 + cresc_real_2024)
+
+# Criar um data.frame comparativo
+comparacao <- data.frame(
+  Ano = c(2023, 2024),
+  PIB_Real_USD = c(pib_real_2023, pib_real_2024),
+  PIB_Previsto_USD = prev_nivel[1:2],
+  Erro_Absoluto = prev_nivel[1:2] - c(pib_real_2023, pib_real_2024),
+  Erro_Percentual = round((prev_nivel[1:2] / c(pib_real_2023, pib_real_2024) - 1) * 100, 2)
+)
+print(comparacao)
+```
+
+Vemos que o erro para 2024 já foi mais que o dobro do que para 2023 (3,26% comparado a 1,55%). Esse resultado nos mostra claramente que quanto mais anos tentamos prever, pior o resultado. Entretanto, devemos confessar satisfação com o resultado. Considerando a simplicidade do modelo, que considera apenas a variável PIB, num país emergente e com crises como o Brasil (sem mencionar a pandemia), um erro tão baixo é impressionante e dentro do aceitável. Isso nos mostra o poder de previsão do modelo ARIMA.
+
